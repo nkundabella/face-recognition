@@ -49,7 +49,3 @@ The default topic is `face-recognition/servo/pan` and the default port is
 `1883`. Do not commit Wi-Fi credentials, broker credentials, enrolled images,
 or generated face databases.
 
-## Project notes
-
-The `book/` directory contains the detailed walkthrough. `src_old/` contains
-the earlier implementation for reference.
