@@ -21,6 +21,9 @@ def main():
     cap = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW)
     if not cap.isOpened():
         raise RuntimeError("Camera not opened. Try changing index (0/1/2).")
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     servo = ServoPanClient(
         enabled=args.servo_mqtt,

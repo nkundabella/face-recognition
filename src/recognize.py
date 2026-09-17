@@ -292,6 +292,165 @@ class FaceDBMatcher:
         )
 
 
+@dataclass
+class TrackedFace:
+    track_id: int
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+    kps: np.ndarray  # (5, 2) float32
+    match_result: MatchResult
+    aligned: Optional[np.ndarray] = None
+    last_embed_time: float = 0.0
+    embed_count: int = 0
+    lost_frames: int = 0
+
+
+def _box_iou(b1: Tuple[int, int, int, int], b2: Tuple[int, int, int, int]) -> float:
+    xA = max(b1[0], b2[0])
+    yA = max(b1[1], b2[1])
+    xB = min(b1[2], b2[2])
+    yB = min(b1[3], b2[3])
+    inter = max(0, xB - xA) * max(0, yB - yA)
+    area1 = max(0, b1[2] - b1[0]) * max(0, b1[3] - b1[1])
+    area2 = max(0, b2[2] - b2[0]) * max(0, b2[3] - b2[1])
+    union = area1 + area2 - inter
+    return float(inter / union) if union > 0 else 0.0
+
+
+def _centroid_dist_norm(b1: Tuple[int, int, int, int], b2: Tuple[int, int, int, int], diag: float) -> float:
+    c1x, c1y = 0.5 * (b1[0] + b1[2]), 0.5 * (b1[1] + b1[3])
+    c2x, c2y = 0.5 * (b2[0] + b2[2]), 0.5 * (b2[1] + b2[3])
+    dist = ((c1x - c2x) ** 2 + (c1y - c2y) ** 2) ** 0.5
+    return dist / diag if diag > 0 else 1.0
+
+
+class FaceTracker:
+    def __init__(
+        self,
+        reembed_interval: float = 2.0,
+        warmup_embeds: int = 3,
+        max_lost_frames: int = 15,
+        iou_threshold: float = 0.3,
+    ):
+        self.reembed_interval = float(reembed_interval)
+        self.warmup_embeds = int(warmup_embeds)
+        self.max_lost_frames = int(max_lost_frames)
+        self.iou_threshold = float(iou_threshold)
+        self.tracks: Dict[int, TrackedFace] = {}
+        self._next_id: int = 1
+
+    def update(
+        self,
+        frame: np.ndarray,
+        detections: List[FaceDet],
+        embedder: ArcFaceEmbedderONNX,
+        matcher: FaceDBMatcher,
+    ) -> List[TrackedFace]:
+        now = time.time()
+        H, W = frame.shape[:2]
+        diag = (W ** 2 + H ** 2) ** 0.5
+
+        det_matched: Dict[int, int] = {}
+        track_matched: set[int] = set()
+
+        if self.tracks and detections:
+            cost_matrix = []
+            track_ids = list(self.tracks.keys())
+            for d in detections:
+                d_box = (d.x1, d.y1, d.x2, d.y2)
+                row = []
+                for t_id in track_ids:
+                    t = self.tracks[t_id]
+                    t_box = (t.x1, t.y1, t.x2, t.y2)
+                    iou = _box_iou(d_box, t_box)
+                    cdist = _centroid_dist_norm(d_box, t_box, diag)
+                    if iou >= self.iou_threshold:
+                        score = 1.0 - iou
+                    elif cdist < 0.15:
+                        score = 1.0 + cdist
+                    else:
+                        score = 999.0
+                    row.append(score)
+                cost_matrix.append(row)
+
+            for _ in range(min(len(detections), len(track_ids))):
+                min_val = 999.0
+                best_d = -1
+                best_t = -1
+                for d_idx in range(len(detections)):
+                    if d_idx in det_matched:
+                        continue
+                    for t_idx in range(len(track_ids)):
+                        t_id = track_ids[t_idx]
+                        if t_id in track_matched:
+                            continue
+                        if cost_matrix[d_idx][t_idx] < min_val:
+                            min_val = cost_matrix[d_idx][t_idx]
+                            best_d = d_idx
+                            best_t = t_id
+                if min_val < 500.0 and best_d >= 0 and best_t >= 0:
+                    det_matched[best_d] = best_t
+                    track_matched.add(best_t)
+
+        active_tracks: List[TrackedFace] = []
+        for d_idx, d in enumerate(detections):
+            if d_idx in det_matched:
+                t_id = det_matched[d_idx]
+                track = self.tracks[t_id]
+                track.x1 = d.x1
+                track.y1 = d.y1
+                track.x2 = d.x2
+                track.y2 = d.y2
+                track.kps = d.kps
+                track.lost_frames = 0
+
+                needs_embed = (
+                    track.embed_count < self.warmup_embeds
+                    or (now - track.last_embed_time) >= self.reembed_interval
+                )
+                if needs_embed:
+                    aligned, _ = align_face_5pt(frame, d.kps, out_size=(112, 112))
+                    emb = embedder.embed(aligned)
+                    track.match_result = matcher.match(emb)
+                    track.aligned = aligned
+                    track.last_embed_time = now
+                    track.embed_count += 1
+
+                active_tracks.append(track)
+            else:
+                t_id = self._next_id
+                self._next_id += 1
+                aligned, _ = align_face_5pt(frame, d.kps, out_size=(112, 112))
+                emb = embedder.embed(aligned)
+                mr = matcher.match(emb)
+
+                new_track = TrackedFace(
+                    track_id=t_id,
+                    x1=d.x1,
+                    y1=d.y1,
+                    x2=d.x2,
+                    y2=d.y2,
+                    kps=d.kps,
+                    match_result=mr,
+                    aligned=aligned,
+                    last_embed_time=now,
+                    embed_count=1,
+                    lost_frames=0,
+                )
+                self.tracks[t_id] = new_track
+                active_tracks.append(new_track)
+
+        unmatched_tracks = set(self.tracks.keys()) - track_matched - {t.track_id for t in active_tracks}
+        for t_id in list(unmatched_tracks):
+            self.tracks[t_id].lost_frames += 1
+            if self.tracks[t_id].lost_frames > self.max_lost_frames:
+                del self.tracks[t_id]
+
+        return active_tracks
+
+
 def main():
     parser = argparse.ArgumentParser(description="Live face recognition with optional ESP8266 servo pan tracking.")
     parser.add_argument("--camera", type=int, default=0, help="OpenCV camera index.")
@@ -320,6 +479,24 @@ def main():
         default=2.0,
         help="Seconds to pause on a face while confirming its identity before tracking or scanning again.",
     )
+    parser.add_argument(
+        "--reembed-interval",
+        type=float,
+        default=2.0,
+        help="Seconds between ArcFace re-embedding refreshes for tracked faces.",
+    )
+    parser.add_argument(
+        "--warmup-embeds",
+        type=int,
+        default=3,
+        help="Number of initial frames to embed a new face before caching its identity.",
+    )
+    parser.add_argument(
+        "--max-lost-frames",
+        type=int,
+        default=15,
+        help="Number of consecutive missing frames before dropping a tracked face.",
+    )
     args = parser.parse_args()
 
     db_path = Path("data/db/face_db.npz")
@@ -329,6 +506,11 @@ def main():
 
     db = load_db_npz(db_path)
     matcher = FaceDBMatcher(db=db, dist_thresh=0.24)
+    tracker = FaceTracker(
+        reembed_interval=args.reembed_interval,
+        warmup_embeds=args.warmup_embeds,
+        max_lost_frames=args.max_lost_frames,
+    )
 
     servo = ServoPanClient(
         enabled=args.servo_mqtt,
@@ -350,6 +532,9 @@ def main():
     cap = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW)
     if not cap.isOpened():
         raise RuntimeError("Camera not available")
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     print("Recognize (multi-face). q=quit, r=reload DB, +/- threshold, d=debug overlay")
     if servo.enabled:
@@ -394,42 +579,42 @@ def main():
         largest_index: Optional[int] = None
         match_results: List[MatchResult] = []
 
-        for i, f in enumerate(faces):
-            cv2.rectangle(vis, (f.x1, f.y1), (f.x2, f.y2), (0, 255, 0), 2)
-            for (x, y) in f.kps.astype(int):
-                cv2.circle(vis, (int(x), int(y)), 2, (0, 255, 0), -1)
+        tracked_faces = tracker.update(frame, faces, embedder, matcher)
 
-            aligned, _ = align_face_5pt(frame, f.kps, out_size=(112, 112))
-            emb = embedder.embed(aligned)
-            mr = matcher.match(emb)
+        for i, tf in enumerate(tracked_faces):
+            mr = tf.match_result
             match_results.append(mr)
 
+            cv2.rectangle(vis, (tf.x1, tf.y1), (tf.x2, tf.y2), (0, 255, 0), 2)
+            for (x, y) in tf.kps.astype(int):
+                cv2.circle(vis, (int(x), int(y)), 2, (0, 255, 0), -1)
+
             label = mr.name if mr.name is not None else "Unknown"
-            line1 = f"{label}"
+            line1 = f"#{tf.track_id} {label}"
             line2 = f"dist={mr.distance:.3f} sim={mr.similarity:.3f}"
 
             color = (0, 255, 0) if mr.accepted else (0, 0, 255)
-            cv2.putText(vis, line1, (f.x1, max(0, f.y1 - 28)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-            cv2.putText(vis, line2, (f.x1, max(0, f.y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            cv2.putText(vis, line1, (tf.x1, max(0, tf.y1 - 28)), cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2)
+            cv2.putText(vis, line2, (tf.x1, max(0, tf.y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
-            if y0 + thumb <= h and shown < 4:
-                vis[y0:y0 + thumb, x0:x0 + thumb] = aligned
-                cv2.putText(vis, f"{i+1}:{label}", (x0, y0 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+            if tf.aligned is not None and y0 + thumb <= h and shown < 4:
+                vis[y0:y0 + thumb, x0:x0 + thumb] = tf.aligned
+                cv2.putText(vis, f"#{tf.track_id}:{label}", (x0, y0 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
                 y0 += thumb + pad
                 shown += 1
 
             if show_debug:
-                dbg = f"kpsLeye=({f.kps[0,0]:.0f},{f.kps[0,1]:.0f})"
+                dbg = f"kpsLeye=({tf.kps[0,0]:.0f},{tf.kps[0,1]:.0f})"
                 cv2.putText(vis, dbg, (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         now = time.time()
         target_visible = False
-        if faces:
+        if tracked_faces:
             largest_index = max(
-                range(len(faces)),
-                key=lambda i: (faces[i].x2 - faces[i].x1) * (faces[i].y2 - faces[i].y1),
+                range(len(tracked_faces)),
+                key=lambda i: (tracked_faces[i].x2 - tracked_faces[i].x1) * (tracked_faces[i].y2 - tracked_faces[i].y1),
             )
-            largest = faces[largest_index]
+            largest = tracked_faces[largest_index]
             largest_match = match_results[largest_index]
             if locked_name is not None:
                 target_index = next(
@@ -437,7 +622,7 @@ def main():
                     None,
                 )
                 if target_index is not None:
-                    target = faces[target_index]
+                    target = tracked_faces[target_index]
                     target_visible = True
                     last_seen_face = now
                     last_seen_target = now
@@ -504,7 +689,7 @@ def main():
                     if (now - last_seen_target) >= args.servo_lost_after
                     else f"HOLD {locked_name}"
                 )
-            elif faces and face_pause_started is not None and (now - face_pause_started) < args.identify_wait:
+            elif tracked_faces and face_pause_started is not None and (now - face_pause_started) < args.identify_wait:
                 mode = f"IDENTIFY {now - face_pause_started:.1f}s"
             else:
                 mode = "SCAN"
