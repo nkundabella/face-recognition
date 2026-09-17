@@ -24,9 +24,18 @@ class ServoPanConfig:
     min_angle: int = 20
     max_angle: int = 160
     center_angle: int = 90
-    gain: float = 10.0
+    kp: float = 8.0
+    kd: float = 1.8
+    gain: float | None = None  # backward compatibility alias for kp
     deadzone_frac: float = 0.08
-    update_every_s: float = 0.12
+    max_step_deg: int = 6
+    update_every_s: float = 0.10
+    d_filter_alpha: float = 0.6
+    reconnect_backoff_s: float = 5.0
+
+    def __post_init__(self):
+        if self.gain is not None:
+            self.kp = float(self.gain)
 
 
 class ServoPanClient:
@@ -50,6 +59,12 @@ class ServoPanClient:
         self._last_error: Optional[str] = None
         self._client: Optional[mqtt.Client] = None
 
+        # PD control tracking state
+        self._prev_error: float = 0.0
+        self._d_error_filtered: float = 0.0
+        self._last_track_time: float = 0.0
+        self._last_connect_attempt: float = 0.0
+
         if self._enabled:
             self._connect()
 
@@ -63,6 +78,8 @@ class ServoPanClient:
             self._client.disconnect()
 
     def center(self) -> None:
+        self._prev_error = 0.0
+        self._d_error_filtered = 0.0
         self.send_angle(self.cfg.center_angle, force=True)
 
     def step(self, delta: int) -> None:
@@ -72,12 +89,36 @@ class ServoPanClient:
         if not self.enabled or frame_width <= 0:
             return
 
+        now = time.time()
         frame_center = frame_width * 0.5
         error_frac = (float(target_x) - frame_center) / frame_center
+
         if abs(error_frac) < self.cfg.deadzone_frac:
+            self._prev_error = error_frac
+            self._d_error_filtered = 0.0
+            self._last_track_time = now
             return
 
-        next_angle = self.angle + int(round(error_frac * self.cfg.gain))
+        dt = now - self._last_track_time if self._last_track_time > 0 else self.cfg.update_every_s
+        if dt < 0.01 or dt > 1.0:
+            dt = max(0.01, self.cfg.update_every_s)
+
+        # Derivative calculation: change in error over time
+        raw_derivative = (error_frac - self._prev_error) / dt
+        # Low-pass filter to reject landmark noise
+        alpha = self.cfg.d_filter_alpha
+        self._d_error_filtered = alpha * self._d_error_filtered + (1.0 - alpha) * raw_derivative
+        self._prev_error = error_frac
+        self._last_track_time = now
+
+        # PD control output: P commands direction, D dampens approach to center
+        control_output = (self.cfg.kp * error_frac) + (self.cfg.kd * self._d_error_filtered)
+
+        # Slew-rate limiter: prevent violent angle snapping
+        max_step = float(self.cfg.max_step_deg)
+        clamped_step = max(-max_step, min(max_step, control_output))
+
+        next_angle = self.angle + int(round(clamped_step))
         self.send_angle(next_angle)
 
     def send_angle(self, angle: int, force: bool = False) -> bool:
@@ -90,7 +131,13 @@ class ServoPanClient:
 
         angle = int(max(self.cfg.min_angle, min(self.cfg.max_angle, angle)))
         if self._client is None:
-            self._connect()
+            # Rate-limited non-blocking reconnection attempt
+            if (now - self._last_connect_attempt) >= self.cfg.reconnect_backoff_s:
+                self._connect()
+            else:
+                self._last_send = now
+                return False
+
         if self._client is None:
             self._last_send = now
             return False
@@ -107,6 +154,7 @@ class ServoPanClient:
         return False
 
     def _connect(self) -> None:
+        self._last_connect_attempt = time.time()
         if mqtt is None:
             raise RuntimeError(
                 f"paho-mqtt is required for servo control: {_MQTT_IMPORT_ERROR}\n"

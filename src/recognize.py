@@ -461,7 +461,10 @@ def main():
     parser.add_argument("--servo-min", type=int, default=20, help="Minimum safe servo angle.")
     parser.add_argument("--servo-max", type=int, default=160, help="Maximum safe servo angle.")
     parser.add_argument("--servo-center", type=int, default=90, help="Centered servo angle.")
-    parser.add_argument("--servo-gain", type=float, default=10.0, help="Pan correction strength.")
+    parser.add_argument("--servo-gain", type=float, default=None, help="Pan correction strength (alias for --servo-kp).")
+    parser.add_argument("--servo-kp", type=float, default=8.0, help="Proportional gain for servo pan.")
+    parser.add_argument("--servo-kd", type=float, default=1.8, help="Derivative damping gain for servo pan.")
+    parser.add_argument("--servo-max-step", type=int, default=6, help="Maximum servo angle change per step.")
     parser.add_argument("--servo-deadzone", type=float, default=0.08, help="Ignore small horizontal face offsets.")
     parser.add_argument("--servo-step", type=int, default=5, help="Manual servo angle step.")
     parser.add_argument("--servo-scan-step", type=int, default=4, help="Angle step while searching for a face.")
@@ -512,13 +515,16 @@ def main():
         max_lost_frames=args.max_lost_frames,
     )
 
+    kp = args.servo_gain if args.servo_gain is not None else args.servo_kp
     servo = ServoPanClient(
         enabled=args.servo_mqtt,
         cfg=ServoPanConfig(
             min_angle=args.servo_min,
             max_angle=args.servo_max,
             center_angle=args.servo_center,
-            gain=args.servo_gain,
+            kp=kp,
+            kd=args.servo_kd,
+            max_step_deg=args.servo_max_step,
             deadzone_frac=args.servo_deadzone,
         ),
         broker=args.mqtt_broker,
