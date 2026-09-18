@@ -99,8 +99,12 @@ class ServoPanClient:
             self._last_track_time = now
             return
 
+        if self._last_track_time <= 0 or (now - self._last_track_time) > 0.5:
+            self._prev_error = error_frac
+            self._d_error_filtered = 0.0
+
         dt = now - self._last_track_time if self._last_track_time > 0 else self.cfg.update_every_s
-        if dt < 0.01 or dt > 1.0:
+        if dt < 0.01 or dt > 0.5:
             dt = max(0.01, self.cfg.update_every_s)
 
         # Derivative calculation: change in error over time
@@ -170,7 +174,7 @@ class ServoPanClient:
             client.loop_start()
             self._client = client
             print(f"[servo] MQTT connected: {self.broker}:{self.port}, topic={self.topic}")
-        except OSError as e:
+        except Exception as e:
             self._print_error(f"MQTT connection failed: {e}")
             self._client = None
 

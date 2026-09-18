@@ -483,6 +483,18 @@ def main():
         help="Seconds to pause on a face while confirming its identity before tracking or scanning again.",
     )
     parser.add_argument(
+        "--dist-thresh",
+        type=float,
+        default=0.32,
+        help="Cosine distance threshold for face recognition (default: 0.32, sim >= 0.68).",
+    )
+    parser.add_argument(
+        "--locked-timeout",
+        type=float,
+        default=12.0,
+        help="Seconds of missing locked target before clearing and returning to scan.",
+    )
+    parser.add_argument(
         "--reembed-interval",
         type=float,
         default=2.0,
@@ -508,7 +520,7 @@ def main():
     embedder = ArcFaceEmbedderONNX(model_path=DEFAULT_EMBEDDER_MODEL, input_size=(112, 112), debug=False)
 
     db = load_db_npz(db_path)
-    matcher = FaceDBMatcher(db=db, dist_thresh=0.24)
+    matcher = FaceDBMatcher(db=db, dist_thresh=args.dist_thresh)
     tracker = FaceTracker(
         reembed_interval=args.reembed_interval,
         warmup_embeds=args.warmup_embeds,
@@ -542,9 +554,9 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    print("Recognize (multi-face). q=quit, r=reload DB, +/- threshold, d=debug overlay")
+    print("Recognize (multi-face). q=quit, r=reload DB, +/- threshold, o=debug overlay, u=unlock target")
     if servo.enabled:
-        print("Servo: t=toggle tracking, left/right=manual pan, c=center")
+        print("Servo: t=toggle tracking, a/d/left/right=manual pan, c=center")
 
     t0 = time.time()
     frames = 0

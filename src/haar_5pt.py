@@ -192,6 +192,8 @@ class Haar5ptDetector:
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         faces = self._haar_faces(gray)
         if faces.shape[0] == 0:
+            self._prev_box = None
+            self._prev_kps = None
             return []
 
         areas = faces[:, 2] * faces[:, 3]
@@ -202,6 +204,8 @@ class Haar5ptDetector:
         if kps is None:
             if self.debug:
                 print("[haar_5pt] Haar face found but FaceMesh returned none -> reject")
+            self._prev_box = None
+            self._prev_kps = None
             return []
 
         margin = 0.35
@@ -216,15 +220,25 @@ class Haar5ptDetector:
         if inside.mean() < 0.60:
             if self.debug:
                 print("[haar_5pt] FaceMesh points not consistent with Haar box -> reject")
+            self._prev_box = None
+            self._prev_kps = None
             return []
 
         if not _kps_span_ok(kps, min_eye_dist=max(10.0, 0.18 * w)):
             if self.debug:
                 print("[haar_5pt] 5pt geometry sanity failed -> reject")
+            self._prev_box = None
+            self._prev_kps = None
             return []
 
         box = _bbox_from_5pt(kps, pad_x=0.55, pad_y_top=0.85, pad_y_bot=1.15)
         box = _clip_box_xyxy(box, W, H)
+
+        if self._prev_box is not None:
+            shift = float(np.linalg.norm(box[:2] - self._prev_box[:2]))
+            if shift > 0.25 * max(W, H):
+                self._prev_box = None
+                self._prev_kps = None
 
         box_s = _ema(self._prev_box, box, self.smooth_alpha)
         kps_s = _ema(self._prev_kps, kps, self.smooth_alpha)
