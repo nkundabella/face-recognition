@@ -30,6 +30,9 @@ const char* MQTT_TOPIC = "face-recognition/servo/pan";
 const char* MQTT_CLIENT_ID = "esp8266-servo-pan-01";
 const IPAddress MQTT_BROKER_IP(0, 0, 0, 0); // Optional fallback. Keep 0.0.0.0 to use MQTT_BROKER.
 
+#ifndef D1
+#define D1 5
+#endif
 const int SERVO_PIN = D1; // GPIO5 on NodeMCU / ESP-12E
 const int MIN_ANGLE = 20;
 const int MAX_ANGLE = 160;
