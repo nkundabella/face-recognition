@@ -13,7 +13,6 @@ htmlcov/
 
 # Editor and local history files
 .history/
-.vscode/
 .idea/
 *.swp
 *.swo
@@ -38,3 +37,5 @@ models/*.onnx
 # OS files
 .DS_Store
 Thumbs.db
+config.bat
+node_modules
