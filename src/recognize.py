@@ -648,6 +648,9 @@ def main():
                 else:
                     candidate_name = None
                     confirmed_name = None
+                    if (now - last_seen_target) >= args.locked_timeout:
+                        print(f"[recognize] Target '{locked_name}' lost for {args.locked_timeout:.1f}s. Resetting lock.")
+                        locked_name = None
             else:
                 if face_pause_started is None:
                     face_pause_started = now
@@ -670,6 +673,9 @@ def main():
                     candidate_name = None
                     confirmed_name = None
         else:
+            if locked_name is not None and (now - last_seen_target) >= args.locked_timeout:
+                print(f"[recognize] Target '{locked_name}' lost for {args.locked_timeout:.1f}s. Resetting lock.")
+                locked_name = None
             if locked_name is None:
                 face_pause_started = None
                 candidate_name = None
@@ -681,7 +687,10 @@ def main():
             else:
                 confirmation_started = candidate_started if candidate_name is not None else face_pause_started
                 identify_done = confirmation_started is None or (now - confirmation_started) >= args.identify_wait
-                no_target_timeout = (now - last_seen_target) >= args.servo_lost_after
+                if locked_name is not None:
+                    no_target_timeout = (now - last_seen_target) >= args.servo_lost_after
+                else:
+                    no_target_timeout = (now - last_seen_face) >= args.servo_scan_after
                 if identify_done and no_target_timeout:
                     if (now - last_scan) >= args.servo_scan_every:
                         next_angle = servo.angle + servo_scan_dir * args.servo_scan_step
@@ -721,29 +730,34 @@ def main():
         cv2.imshow("recognize_new", vis)
         key = cv2.waitKey(1) & 0xFF
 
-        if key == ord("q"):
+        if key in (ord("q"), ord("Q")):
             break
-        elif servo.enabled and key == ord("t"):
+        elif servo.enabled and key in (ord("t"), ord("T")):
             servo_tracking = not servo_tracking
             print(f"[servo] tracking: {'ON' if servo_tracking else 'OFF'}")
-        elif servo.enabled and key in (81,):
+        elif servo.enabled and key in (ord("a"), ord("A"), 81):
             servo_tracking = False
             servo.step(-args.servo_step)
-        elif servo.enabled and key in (83,):
+        elif servo.enabled and key in (ord("d"), ord("D"), 83):
             servo_tracking = False
             servo.step(args.servo_step)
-        elif servo.enabled and key == ord("c"):
+        elif servo.enabled and key in (ord("c"), ord("C")):
             servo.center()
-        elif key == ord("r"):
+        elif key in (ord("u"), ord("U")):
+            locked_name = None
+            candidate_name = None
+            confirmed_name = None
+            print("[recognize] Target unlocked manually.")
+        elif key in (ord("r"), ord("R")):
             matcher.reload_from(db_path)
             print(f"[recognize] reloaded DB: {len(matcher._names)} identities")
         elif key in (ord("+"), ord("=")):
             matcher.dist_thresh = float(min(1.20, matcher.dist_thresh + 0.01))
             print(f"[recognize] thr(dist)={matcher.dist_thresh:.2f} (sim~{1.0-matcher.dist_thresh:.2f})")
-        elif key == ord("-"):
+        elif key in (ord("-"), ord("_")):
             matcher.dist_thresh = float(max(0.05, matcher.dist_thresh - 0.01))
             print(f"[recognize] thr(dist)={matcher.dist_thresh:.2f} (sim~{1.0-matcher.dist_thresh:.2f})")
-        elif key == ord("d"):
+        elif key in (ord("o"), ord("O")):
             show_debug = not show_debug
             print(f"[recognize] debug overlay: {'ON' if show_debug else 'OFF'}")
 
